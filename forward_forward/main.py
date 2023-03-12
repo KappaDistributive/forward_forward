@@ -102,14 +102,18 @@ class Net(nn.Module):
                 )
             )
 
-    def train(self, x: Tensor, y: Tensor):
+    def train(self, x: Tensor, y: Tensor) -> float:
         x_positive = overlay_label(x, y)
 
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
         x_negative = overlay_label(x, y_negative)
         hidden_positive, hidden_negative = torch.flatten(x_positive, 1), torch.flatten(x_negative, 1)
+        total_loss = Tensor((0.0,))
         for index, layer in enumerate(self.layers):
-            hidden_positive, hidden_negative, _ = layer.train(hidden_positive, hidden_negative)
+            hidden_positive, hidden_negative, loss = layer.train(hidden_positive, hidden_negative)
+            total_loss += loss
+
+        return total_loss.item()
 
     def predict(self, x: Tensor) -> Tensor:
         goodness_per_label = []
@@ -126,11 +130,12 @@ class Net(nn.Module):
 
 if __name__ == "__main__":
     train_loader, test_loader = MNIST_loaders(1000, 1000)
-    net = Net([28 * 28, 500, 500, 500, 500, 500, 500], lr=0.03, threshold=5.0)
+    net = Net([28 * 28, 2000, 2000, 2000, 2000], lr=3e-3, threshold=0.0)
     for epoch in range(500):
         print(f"Epoch #{epoch+1}")
         for x, y in train_loader:
-            net.train(x, y)
+            loss = net.train(x, y)
+            print(loss)
 
         y_true = []
         y_prediction = []
