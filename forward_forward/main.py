@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -8,13 +10,23 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.transforms import ToTensor
 
-PYTORCH_DATA_DIR = os.getenv("PYTORCH_DATA_DIR")
+PYTORCH_DATA_DIR_: str = os.getenv("PYTORCH_DATA_DIR")
+if PYTORCH_DATA_DIR_ is None:
+    print(
+        "Please set the enviroment variable `PYTORCH_DATA_DIR`. "
+        "It serves as a data dir for training data and models."
+    )
+    sys.exit(1)
+else:
+    PYTORCH_DATA_DIR: Path = Path(PYTORCH_DATA_DIR_)
+    PYTORCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
+del PYTORCH_DATA_DIR_
 
 
 def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> (DataLoader, DataLoader):
     train_loader = DataLoader(
         MNIST(
-            PYTORCH_DATA_DIR,
+            str(PYTORCH_DATA_DIR),
             train=True,
             download=True,
             transform=ToTensor(),
@@ -24,7 +36,7 @@ def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> (DataLoader, D
     )
     test_loader = DataLoader(
         MNIST(
-            PYTORCH_DATA_DIR,
+            str(PYTORCH_DATA_DIR),
             train=False,
             download=True,
             transform=ToTensor(),
@@ -130,7 +142,7 @@ class Net(nn.Module):
 
 if __name__ == "__main__":
     train_loader, test_loader = MNIST_loaders(1000, 1000)
-    net = Net([28 * 28, 2000, 2000, 2000, 2000], lr=3e-3, threshold=0.0)
+    net = Net([28 * 28, 2000, 2000, 2000, 2000], lr=3e-2, threshold=0.0)
     for epoch in range(500):
         print(f"Epoch #{epoch+1}")
         for x, y in train_loader:
