@@ -1,3 +1,6 @@
+"""
+[The Forward-Forward Algorithm: Some Preliminary Investigations](https://arxiv.org/abs/2212.13345)
+"""
 import os
 import sys
 from pathlib import Path
@@ -8,7 +11,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
-from torchvision.transforms import ToTensor
+from torchvision.transforms import Compose, Normalize, ToTensor
 
 PYTORCH_DATA_DIR_: str = os.getenv("PYTORCH_DATA_DIR")
 if PYTORCH_DATA_DIR_ is None:
@@ -24,25 +27,35 @@ del PYTORCH_DATA_DIR_
 
 
 def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> (DataLoader, DataLoader):
+    transformation = Compose(
+        (
+            ToTensor(),
+            Normalize((0.1307,), (0.3081,)),
+        )
+    )
     train_loader = DataLoader(
         MNIST(
             str(PYTORCH_DATA_DIR),
             train=True,
             download=True,
-            transform=ToTensor(),
+            transform=transformation,
         ),
         shuffle=True,
         batch_size=train_batch_size,
+        num_workers=8,
+        persistent_workers=True,
     )
     test_loader = DataLoader(
         MNIST(
             str(PYTORCH_DATA_DIR),
             train=False,
             download=True,
-            transform=ToTensor(),
+            transform=transformation,
         ),
         shuffle=True,
         batch_size=test_batch_size,
+        num_workers=4,
+        persistent_workers=True,
     )
 
     return train_loader, test_loader
@@ -139,6 +152,7 @@ class Net(nn.Module):
         x_positive = overlay_label(x, y)
 
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
+        assert not torch.any(y == y_negative)
         x_negative = overlay_label(x, y_negative)
         hidden_positive, hidden_negative = torch.flatten(x_positive.to(self.device), 1), torch.flatten(
             x_negative.to(self.device), 1
@@ -155,34 +169,40 @@ class Net(nn.Module):
         for label in range(10):
             h = torch.flatten(overlay_label(x, label), 1)
             goodness = []
-            for layer in self.layers:
+            for index, layer in enumerate(self.layers):
                 h = layer(h.to(self.device))
-                goodness.append(h.pow(2).mean(1))
+                if index > 0:  # use all but the first hidden layer as in the paper
+                    goodness.append(h.pow(2).mean(1))
             goodness_per_label.append(sum(goodness).unsqueeze(1))
         goodness_per_label = torch.cat(goodness_per_label, 1)
         return goodness_per_label.argmax(1)
 
 
 if __name__ == "__main__":
-    train_loader, test_loader = MNIST_loaders(5_000, 10_000)
+    train_loader, test_loader = MNIST_loaders(1_000, 10_000)
     device: torch.device = torch.device("mps")
+    print(f"Device: {device}")
     optmizer_config = {
         "name": "Adam",
-        "lr": 0.1,
+        "lr": 0.03,
     }
-    net = Net([28 * 28, 4000, 2000, 1000], optimizer_config=optmizer_config, threshold=0.0, device=device)
+    net = Net([28 * 28, 2000, 2000, 2000, 2000], optimizer_config=optmizer_config, threshold=2.0, device=device)
     for epoch in range(500):
         print(f"Epoch #{epoch+1}")
+        total_loss: float = 0.0
+        num_steps: int = 0
         for x, y in train_loader:
-            loss = net.train(x, y)
-            print(loss)
+            total_loss += net.train(x, y)
+            num_steps += 1
+        print(total_loss / num_steps)
 
-        y_true = []
-        y_prediction = []
-        for x, y in test_loader:
-            y_true.append(y)
-            y_prediction.append(net.predict(x).cpu())
-        y_true = torch.cat(y_true)
-        y_prediction = torch.cat(y_prediction)
-        print(f"Accuracy: {100. * (torch.sum(y_true == y_prediction) / y_true.shape[0]).item():.2f}%")
-        print()
+        with torch.no_grad():
+            y_true = []
+            y_prediction = []
+            for x, y in test_loader:
+                y_true.append(y)
+                y_prediction.append(net.predict(x).cpu())
+            y_true = torch.cat(y_true)
+            y_prediction = torch.cat(y_prediction)
+            print(f"Accuracy: {100. * (torch.sum(y_true == y_prediction) / y_true.shape[0]).item():.2f}%")
+            print()
