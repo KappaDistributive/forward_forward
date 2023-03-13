@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import torch
 import torch.nn as nn
@@ -62,15 +62,30 @@ class Layer(nn.Linear):
         in_features: int,
         out_features: int,
         bias: bool,
-        lr: float,
+        optimizer_config: dict,
         threshold: float,
         device: Optional[torch.device] = None,
         dtype=None,
     ) -> None:
         super().__init__(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
         self.activation = nn.ReLU()
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.optimizer = Layer._get_optimizer(optimizer_config, self.parameters())
         self.threshold = threshold
+
+    @staticmethod
+    def _get_optimizer(
+        optimizer_config: dict, parameters: Iterator[torch.nn.parameter.Parameter]
+    ) -> torch.optim.Optimizer:
+        if optimizer_config["name"].lower() == "sgd":
+            constructor = torch.optim.SGD
+        elif optimizer_config["name"].lower() == "adam":
+            constructor = torch.optim.Adam
+        elif optimizer_config["name"].lower() == "rmsprop":
+            constructor = torch.optim.RMSprop
+        else:
+            raise ValueError(f"Unsupported optimizer {optimizer_config['name']}")
+        config = {k: v for k, v in optimizer_config.items() if k != "name"}
+        return constructor(parameters, **config)
 
     def forward(self, x: Tensor) -> Tensor:
         x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-5)
@@ -97,17 +112,23 @@ class Layer(nn.Linear):
 
 class Net(nn.Module):
     def __init__(
-        self, dimensions: list[int], lr: float, threshold: float, device: Optional[torch.device] = None, dtype=None
+        self,
+        dimensions: list[int],
+        optimizer_config: dict,
+        threshold: float,
+        device: Optional[torch.device] = None,
+        dtype=None,
     ):
         super().__init__()
         self.layers: list[Layer] = []
+        self.device = device if device is not None else torch.device("cpu")
         for index in range(len(dimensions) - 1):
             self.layers.append(
                 Layer(
                     dimensions[index],
                     dimensions[index + 1],
                     bias=True,
-                    lr=lr,
+                    optimizer_config=optimizer_config,
                     threshold=threshold,
                     device=device,
                     dtype=dtype,
@@ -119,13 +140,15 @@ class Net(nn.Module):
 
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
         x_negative = overlay_label(x, y_negative)
-        hidden_positive, hidden_negative = torch.flatten(x_positive, 1), torch.flatten(x_negative, 1)
-        total_loss = Tensor((0.0,))
+        hidden_positive, hidden_negative = torch.flatten(x_positive.to(self.device), 1), torch.flatten(
+            x_negative.to(self.device), 1
+        )
+        losses: list[float] = []
         for index, layer in enumerate(self.layers):
             hidden_positive, hidden_negative, loss = layer.train(hidden_positive, hidden_negative)
-            total_loss += loss
+            losses.append(loss.item())
 
-        return total_loss.item()
+        return sum(losses) / len(losses)
 
     def predict(self, x: Tensor) -> Tensor:
         goodness_per_label = []
@@ -133,7 +156,7 @@ class Net(nn.Module):
             h = torch.flatten(overlay_label(x, label), 1)
             goodness = []
             for layer in self.layers:
-                h = layer(h)
+                h = layer(h.to(self.device))
                 goodness.append(h.pow(2).mean(1))
             goodness_per_label.append(sum(goodness).unsqueeze(1))
         goodness_per_label = torch.cat(goodness_per_label, 1)
@@ -141,8 +164,13 @@ class Net(nn.Module):
 
 
 if __name__ == "__main__":
-    train_loader, test_loader = MNIST_loaders(1000, 1000)
-    net = Net([28 * 28, 2000, 2000, 2000, 2000], lr=3e-2, threshold=0.0)
+    train_loader, test_loader = MNIST_loaders(5_000, 10_000)
+    device: torch.device = torch.device("mps")
+    optmizer_config = {
+        "name": "Adam",
+        "lr": 0.1,
+    }
+    net = Net([28 * 28, 4000, 2000, 1000], optimizer_config=optmizer_config, threshold=0.0, device=device)
     for epoch in range(500):
         print(f"Epoch #{epoch+1}")
         for x, y in train_loader:
@@ -153,7 +181,8 @@ if __name__ == "__main__":
         y_prediction = []
         for x, y in test_loader:
             y_true.append(y)
-            y_prediction.append(net.predict(x))
+            y_prediction.append(net.predict(x).cpu())
         y_true = torch.cat(y_true)
         y_prediction = torch.cat(y_prediction)
         print(f"Accuracy: {100. * (torch.sum(y_true == y_prediction) / y_true.shape[0]).item():.2f}%")
+        print()
