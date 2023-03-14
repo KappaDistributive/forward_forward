@@ -4,7 +4,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.transforms import Compose, Normalize, ToTensor
 
-PYTORCH_DATA_DIR_: str = os.getenv("PYTORCH_DATA_DIR")
+PYTORCH_DATA_DIR_: Optional[str] = os.getenv("PYTORCH_DATA_DIR")
 if PYTORCH_DATA_DIR_ is None:
     print(
         "Please set the enviroment variable `PYTORCH_DATA_DIR`. "
@@ -26,7 +26,7 @@ else:
 del PYTORCH_DATA_DIR_
 
 
-def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> (DataLoader, DataLoader):
+def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> Tuple[DataLoader, DataLoader]:
     transformation = Compose(
         (
             ToTensor(),
@@ -61,7 +61,8 @@ def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> (DataLoader, D
     return train_loader, test_loader
 
 
-def overlay_label(images: Tensor, labels: Tensor) -> Tensor:
+def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
+    assert int(images.shape[0]) == len(labels)
     x = images.clone()
     x[:, :, 0, :10] = 0.0
     x[range(x.shape[0]), :, 0, labels] = 1.0
@@ -89,22 +90,20 @@ class Layer(nn.Linear):
     def _get_optimizer(
         optimizer_config: dict, parameters: Iterator[torch.nn.parameter.Parameter]
     ) -> torch.optim.Optimizer:
-        if optimizer_config["name"].lower() == "sgd":
-            constructor = torch.optim.SGD
-        elif optimizer_config["name"].lower() == "adam":
-            constructor = torch.optim.Adam
-        elif optimizer_config["name"].lower() == "rmsprop":
-            constructor = torch.optim.RMSprop
-        else:
-            raise ValueError(f"Unsupported optimizer {optimizer_config['name']}")
         config = {k: v for k, v in optimizer_config.items() if k != "name"}
-        return constructor(parameters, **config)
+        if optimizer_config["name"].lower() == "sgd":
+            return torch.optim.SGD(parameters, **config)
+        elif optimizer_config["name"].lower() == "adam":
+            return torch.optim.Adam(parameters, **config)
+        elif optimizer_config["name"].lower() == "rmsprop":
+            return torch.optim.RMSprop(parameters, **config)
+        raise ValueError(f"Unsupported optimizer {optimizer_config['name']}")
 
     def forward(self, x: Tensor) -> Tensor:
         x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-5)
         return self.activation(torch.mm(x_direction, self.weight.T) + self.bias.unsqueeze(0))
 
-    def train(self, x_positive: Tensor, x_negative: Tensor) -> (Tensor, Tensor, Tensor):
+    def train_step(self, x_positive: Tensor, x_negative: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         bus_positive = self.forward(x_positive)
         bus_negative = self.forward(x_negative)
 
@@ -148,34 +147,34 @@ class Net(nn.Module):
                 )
             )
 
-    def train(self, x: Tensor, y: Tensor) -> float:
-        x_positive = overlay_label(x, y)
+    def train_step(self, x: Tensor, y: Tensor) -> float:
+        x_positive = overlay_label(x, list(y))
 
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
         assert not torch.any(y == y_negative)
-        x_negative = overlay_label(x, y_negative)
+        x_negative = overlay_label(x, list(y_negative))
         hidden_positive, hidden_negative = torch.flatten(x_positive.to(self.device), 1), torch.flatten(
             x_negative.to(self.device), 1
         )
         losses: list[float] = []
         for index, layer in enumerate(self.layers):
-            hidden_positive, hidden_negative, loss = layer.train(hidden_positive, hidden_negative)
+            hidden_positive, hidden_negative, loss = layer.train_step(hidden_positive, hidden_negative)
             losses.append(loss.item())
 
         return sum(losses) / len(losses)
 
     def predict(self, x: Tensor) -> Tensor:
-        goodness_per_label = []
+        goodness_per_label: list[Tensor] = []
         for label in range(10):
-            h = torch.flatten(overlay_label(x, label), 1)
-            goodness = []
+            h = torch.flatten(overlay_label(x, [label] * int(x.shape[0])), 1)
+            goodness: list[Tensor] = []
             for index, layer in enumerate(self.layers):
                 h = layer(h.to(self.device))
                 if index > 0:  # use all but the first hidden layer as in the paper
                     goodness.append(h.pow(2).mean(1))
-            goodness_per_label.append(sum(goodness).unsqueeze(1))
-        goodness_per_label = torch.cat(goodness_per_label, 1)
-        return goodness_per_label.argmax(1)
+            goodness_per_label.append(Tensor(sum(goodness)).unsqueeze(1))
+        goodness_per_label_t: Tensor = torch.cat(goodness_per_label, 1)
+        return goodness_per_label_t.argmax(1)
 
 
 if __name__ == "__main__":
@@ -192,17 +191,17 @@ if __name__ == "__main__":
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            total_loss += net.train(x, y)
+            total_loss += net.train_step(x, y)
             num_steps += 1
         print(total_loss / num_steps)
 
         with torch.no_grad():
-            y_true = []
-            y_prediction = []
+            y_true_l: list[Tensor] = []
+            y_prediction_l: list[Tensor] = []
             for x, y in test_loader:
-                y_true.append(y)
-                y_prediction.append(net.predict(x).cpu())
-            y_true = torch.cat(y_true)
-            y_prediction = torch.cat(y_prediction)
-            print(f"Accuracy: {100. * (torch.sum(y_true == y_prediction) / y_true.shape[0]).item():.2f}%")
+                y_true_l.append(y)
+                y_prediction_l.append(net.predict(x).cpu())
+            y_true: Tensor = torch.cat(y_true_l)
+            y_prediction: Tensor = torch.cat(y_prediction_l)
+            print(f"Accuracy: {100. * (torch.sum(torch.eq(y_true, y_prediction)) / y_true.shape[0]).item():.2f}%")
             print()
