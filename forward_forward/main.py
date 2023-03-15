@@ -61,15 +61,6 @@ def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> Tuple[DataLoad
     return train_loader, test_loader
 
 
-def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
-    assert int(images.shape[0]) == len(labels)
-    x = images.clone()
-    x[:, :, 0, :10] = 0.0
-    x[range(x.shape[0]), :, 0, labels] = 1.0
-
-    return x
-
-
 class Layer(nn.Linear):
     def __init__(
         self,
@@ -172,6 +163,24 @@ class Net(nn.Module):
         return goodness_per_label_t.argmax(1)
 
 
+def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
+    assert int(images.shape[0]) == len(labels)
+    x = images.clone()
+    x[:, :, 0, :10] = 0.0
+    x[range(x.shape[0]), :, 0, labels] = 1.0
+
+    return x
+
+
+def create_training_data(x: Tensor, y: Tensor) -> Tuple[Tensor, Tensor]:
+    x_positive = overlay_label(x, list(y))
+    y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
+    assert not torch.any(y == y_negative)
+    x_negative = overlay_label(x, list(y_negative))
+
+    return x_positive, x_negative
+
+
 if __name__ == "__main__":
     train_loader, test_loader = MNIST_loaders(1_000, 10_000)
     device: torch.device = torch.device("mps")
@@ -186,10 +195,7 @@ if __name__ == "__main__":
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive = overlay_label(x, list(y))
-            y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
-            assert not torch.any(y == y_negative)
-            x_negative = overlay_label(x, list(y_negative))
+            x_positive, x_negative = create_training_data(x, y)
             total_loss += net.train_step(x_positive, x_negative)
             num_steps += 1
         print(total_loss / num_steps)
