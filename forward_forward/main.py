@@ -3,6 +3,7 @@
 """
 import os
 import sys
+from enum import Enum
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
 
@@ -172,11 +173,16 @@ def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
     return x
 
 
-def create_training_data(x: Tensor, y: Tensor) -> Tuple[Tensor, Tensor]:
-    x_positive = overlay_label(x, list(y))
-    y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
-    assert not torch.any(y == y_negative)
-    x_negative = overlay_label(x, list(y_negative))
+class TrainingMode(Enum):
+    RANDOM_SUPERVISED = 1
+
+
+def create_training_data(x: Tensor, y: Tensor, mode: TrainingMode) -> Tuple[Tensor, Tensor]:
+    if mode == TrainingMode.RANDOM_SUPERVISED:
+        x_positive = overlay_label(x, list(y))
+        y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
+        assert not torch.any(y == y_negative)
+        x_negative = overlay_label(x, list(y_negative))
 
     return x_positive, x_negative
 
@@ -195,7 +201,7 @@ if __name__ == "__main__":
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y)
+            x_positive, x_negative = create_training_data(x, y, TrainingMode.RANDOM_SUPERVISED)
             total_loss += net.train_step(x_positive, x_negative)
             num_steps += 1
         print(total_loss / num_steps)
