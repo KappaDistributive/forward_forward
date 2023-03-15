@@ -147,12 +147,7 @@ class Net(nn.Module):
                 )
             )
 
-    def train_step(self, x: Tensor, y: Tensor) -> float:
-        x_positive = overlay_label(x, list(y))
-
-        y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
-        assert not torch.any(y == y_negative)
-        x_negative = overlay_label(x, list(y_negative))
+    def train_step(self, x_positive: Tensor, x_negative: Tensor) -> float:
         hidden_positive, hidden_negative = torch.flatten(x_positive.to(self.device), 1), torch.flatten(
             x_negative.to(self.device), 1
         )
@@ -191,7 +186,11 @@ if __name__ == "__main__":
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            total_loss += net.train_step(x, y)
+            x_positive = overlay_label(x, list(y))
+            y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
+            assert not torch.any(y == y_negative)
+            x_negative = overlay_label(x, list(y_negative))
+            total_loss += net.train_step(x_positive, x_negative)
             num_steps += 1
         print(total_loss / num_steps)
 
