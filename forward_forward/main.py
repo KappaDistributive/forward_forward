@@ -117,7 +117,8 @@ class Net(nn.Module):
         self,
         dimensions: list[int],
         optimizer_config: dict,
-        threshold: float,
+        sm_optimizer_config: Optional[dict] = None,
+        threshold: float = 0.0,
         use_softmax: bool = False,
         num_classes: int = 10,
         device: Optional[torch.device] = None,
@@ -144,9 +145,10 @@ class Net(nn.Module):
         self.cross_entropy_loss = None
         self.cross_entropy_optimizer = None
         if use_softmax:
+            assert isinstance(sm_optimizer_config, dict)
             self.linear = torch.nn.Linear(sum(dimensions[2:]), self.num_classes, device=self.device, dtype=dtype)
             self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
-            self.cross_entropy_optimizer = get_optimizer(optimizer_config, self.linear.parameters())
+            self.cross_entropy_optimizer = get_optimizer(sm_optimizer_config, self.linear.parameters())
 
     def train_step(self, x_positive: Tensor, x_negative: Tensor, y_positive: Optional[Tensor] = None) -> float:
         hidden_positive, hidden_negative = torch.flatten(x_positive.to(self.device), 1), torch.flatten(
@@ -156,7 +158,7 @@ class Net(nn.Module):
         hidden_states: list[Tensor] = []
         for index, layer in enumerate(self.layers):
             hidden_positive, hidden_negative, loss = layer.train_step(hidden_positive, hidden_negative)
-            if index > 0 and self.use_softmax:
+            if index > 0:
                 hidden_states.append(hidden_positive)
             losses.append(loss.item())
         if self.use_softmax:
@@ -164,7 +166,7 @@ class Net(nn.Module):
             assert isinstance(self.cross_entropy_loss, torch.nn.CrossEntropyLoss)
             assert isinstance(self.cross_entropy_optimizer, torch.optim.Optimizer)
             assert isinstance(y_positive, Tensor)
-            x = self.linear(torch.cat(hidden_states, 1))
+            x = self.linear(torch.cat(hidden_states, 1).detach())
             x = torch.softmax(x, 1)
             loss = self.cross_entropy_loss(x, y_positive.to(self.device))
             losses.append(loss.item())
@@ -174,8 +176,11 @@ class Net(nn.Module):
 
         return sum(losses) / len(losses)
 
+    @torch.no_grad()
     def predict(self, x: Tensor, prefer_goodness: Optional[bool] = None) -> Tensor:
-        if (prefer_goodness or False) == False and self.use_softmax:
+        if prefer_goodness is None:
+            prefer_goodness = False
+        if self.use_softmax and (not prefer_goodness):
             x = x.clone()
             x[:, :, 0, :10] = 0.1
             h = torch.flatten(x, 1)
@@ -259,14 +264,19 @@ def supervised() -> None:
     device: torch.device = torch.device("mps")
     training_mode = TrainingMode.HARD_SUPERVISED
     print(f"Device: {device}")
-    optmizer_config = {
+    optimizer_config = {
+        "name": "Adam",
+        "lr": 0.03,
+    }
+    sm_optimizer_config = {
         "name": "Adam",
         "lr": 0.001,
     }
     net = Net(
         [28 * 28, 2000, 2000, 2000, 2000],
         use_softmax=True,
-        optimizer_config=optmizer_config,
+        optimizer_config=optimizer_config,
+        sm_optimizer_config=sm_optimizer_config,
         threshold=0.0,
         device=device,
     )
@@ -295,42 +305,11 @@ def supervised() -> None:
                 for x, y in test_loader:
                     y_true_l_sm.append(y)
                     y_prediction_l_sm.append(net.predict(x, prefer_goodness=True).argmax(1).cpu())
+                y_true_sm: Tensor = torch.cat(y_true_l_sm)
                 y_prediction_sm: Tensor = torch.cat(y_prediction_l_sm)
                 print(
-                    f"Accuracy (goodness): {100. * (torch.sum(torch.eq(y_true, y_prediction_sm)) / y_true.shape[0]).item():.2f}%"
+                    f"Accuracy (goodness): {100. * (torch.sum(torch.eq(y_true_sm, y_prediction_sm)) / y_true_sm.shape[0]).item():.2f}%"
                 )
-            print()
-
-
-def self_supervised() -> None:
-    train_loader, test_loader = MNIST_loaders(1_000, 10_000)
-    device: torch.device = torch.device("mps")
-    training_mode = TrainingMode.SELF_SUPERVISED
-    print(f"Device: {device}")
-    optmizer_config = {
-        "name": "Adam",
-        "lr": 0.03,
-    }
-    net = Net([28 * 28, 2000, 2000, 2000, 2000], optimizer_config=optmizer_config, threshold=2.0, device=device)
-    for epoch in range(500):
-        print(f"Epoch #{epoch+1}")
-        total_loss: float = 0.0
-        num_steps: int = 0
-        for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y, net, training_mode)
-            total_loss += net.train_step(x_positive, x_negative)
-            num_steps += 1
-        print(total_loss / num_steps)
-
-        with torch.no_grad():
-            y_true_l: list[Tensor] = []
-            y_prediction_l: list[Tensor] = []
-            for x, y in test_loader:
-                y_true_l.append(y)
-                y_prediction_l.append(net.predict(x).argmax(1).cpu())
-            y_true: Tensor = torch.cat(y_true_l)
-            y_prediction: Tensor = torch.cat(y_prediction_l)
-            print(f"Accuracy: {100. * (torch.sum(torch.eq(y_true, y_prediction)) / y_true.shape[0]).item():.2f}%")
             print()
 
 
