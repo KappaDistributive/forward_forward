@@ -189,6 +189,13 @@ class Net(nn.Module):
             return torch.softmax(goodness_per_label_t.detach(), dim=1)
 
 
+def find_hard_negative_label(images: Tensor, labels: Tensor, net: Net) -> Tensor:
+    with torch.no_grad():
+        predictions = net.predict(images)
+        predictions[range(images.shape[0]), labels] = 0.0
+    return predictions.argmax(1).detach()
+
+
 def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
     assert int(images.shape[0]) == len(labels)
     x = images.clone()
@@ -204,11 +211,15 @@ class TrainingMode(Enum):
     SELF_SUPERVISED = 3
 
 
-def create_training_data(x: Tensor, y: Tensor, mode: TrainingMode) -> Tuple[Tensor, Tensor]:
+def create_training_data(x: Tensor, y: Tensor, net: Net, mode: TrainingMode) -> Tuple[Tensor, Tensor]:
     if mode == TrainingMode.RANDOM_SUPERVISED:
         x_positive = overlay_label(x, list(y))
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
         assert not torch.any(y == y_negative)
+        x_negative = overlay_label(x, list(y_negative))
+    elif mode == TrainingMode.HARD_SUPERVISED:
+        x_positive = overlay_label(x, list(y))
+        y_negative = find_hard_negative_label(x, y, net)
         x_negative = overlay_label(x, list(y_negative))
     else:
         raise NotImplementedError()
@@ -234,7 +245,7 @@ def create_masks(size: Tuple[int, int, int], num_blurrs: int):
 def supervised() -> None:
     train_loader, test_loader = MNIST_loaders(512, 10_000)
     device: torch.device = torch.device("mps")
-    training_mode = TrainingMode.RANDOM_SUPERVISED
+    training_mode = TrainingMode.HARD_SUPERVISED
     print(f"Device: {device}")
     optmizer_config = {
         "name": "Adam",
@@ -246,7 +257,7 @@ def supervised() -> None:
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y, training_mode)
+            x_positive, x_negative = create_training_data(x, y, net, training_mode)
             total_loss += net.train_step(x_positive, x_negative)
             num_steps += 1
         print(total_loss / num_steps)
@@ -263,10 +274,10 @@ def supervised() -> None:
             print()
 
 
-def unsupervised() -> None:
+def self_supervised() -> None:
     train_loader, test_loader = MNIST_loaders(1_000, 10_000)
     device: torch.device = torch.device("mps")
-    training_mode = TrainingMode.RANDOM_SUPERVISED
+    training_mode = TrainingMode.SELF_SUPERVISED
     print(f"Device: {device}")
     optmizer_config = {
         "name": "Adam",
@@ -278,7 +289,7 @@ def unsupervised() -> None:
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y, training_mode)
+            x_positive, x_negative = create_training_data(x, y, net, training_mode)
             total_loss += net.train_step(x_positive, x_negative)
             num_steps += 1
         print(total_loss / num_steps)
