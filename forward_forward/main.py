@@ -174,8 +174,8 @@ class Net(nn.Module):
 
         return sum(losses) / len(losses)
 
-    def predict(self, x: Tensor) -> Tensor:
-        if self.use_softmax:
+    def predict(self, x: Tensor, prefer_goodness: Optional[bool] = None) -> Tensor:
+        if (prefer_goodness or False) == False and self.use_softmax:
             x = x.clone()
             x[:, :, 0, :10] = 0.1
             h = torch.flatten(x, 1)
@@ -261,7 +261,7 @@ def supervised() -> None:
     print(f"Device: {device}")
     optmizer_config = {
         "name": "Adam",
-        "lr": 0.03,
+        "lr": 0.001,
     }
     net = Net(
         [28 * 28, 2000, 2000, 2000, 2000],
@@ -275,10 +275,7 @@ def supervised() -> None:
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            if epoch == 0:
-                x_positive, x_negative = create_training_data(x, y, net, TrainingMode.RANDOM_SUPERVISED)
-            else:
-                x_positive, x_negative = create_training_data(x, y, net, training_mode)
+            x_positive, x_negative = create_training_data(x, y, net, training_mode)
             total_loss += net.train_step(x_positive, x_negative, y)
             num_steps += 1
         print(total_loss / num_steps)
@@ -292,6 +289,16 @@ def supervised() -> None:
             y_true: Tensor = torch.cat(y_true_l)
             y_prediction: Tensor = torch.cat(y_prediction_l)
             print(f"Accuracy: {100. * (torch.sum(torch.eq(y_true, y_prediction)) / y_true.shape[0]).item():.2f}%")
+            if net.use_softmax:
+                y_true_l_sm: list[Tensor] = []
+                y_prediction_l_sm: list[Tensor] = []
+                for x, y in test_loader:
+                    y_true_l_sm.append(y)
+                    y_prediction_l_sm.append(net.predict(x, prefer_goodness=True).argmax(1).cpu())
+                y_prediction_sm: Tensor = torch.cat(y_prediction_l_sm)
+                print(
+                    f"Accuracy (goodness): {100. * (torch.sum(torch.eq(y_true, y_prediction_sm)) / y_true.shape[0]).item():.2f}%"
+                )
             print()
 
 
