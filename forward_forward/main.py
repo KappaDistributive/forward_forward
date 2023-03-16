@@ -62,6 +62,17 @@ def MNIST_loaders(train_batch_size: int, test_batch_size: int) -> Tuple[DataLoad
     return train_loader, test_loader
 
 
+def get_optimizer(optimizer_config: dict, parameters: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
+    config = {k: v for k, v in optimizer_config.items() if k != "name"}
+    if optimizer_config["name"].lower() == "sgd":
+        return torch.optim.SGD(parameters, **config)
+    elif optimizer_config["name"].lower() == "adam":
+        return torch.optim.Adam(parameters, **config)
+    elif optimizer_config["name"].lower() == "rmsprop":
+        return torch.optim.RMSprop(parameters, **config)
+    raise ValueError(f"Unsupported optimizer {optimizer_config['name']}")
+
+
 class Layer(nn.Linear):
     def __init__(
         self,
@@ -75,21 +86,8 @@ class Layer(nn.Linear):
     ) -> None:
         super().__init__(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
         self.activation = nn.ReLU()
-        self.optimizer = Layer._get_optimizer(optimizer_config, self.parameters())
+        self.optimizer = get_optimizer(optimizer_config, self.parameters())
         self.threshold = threshold
-
-    @staticmethod
-    def _get_optimizer(
-        optimizer_config: dict, parameters: Iterator[torch.nn.parameter.Parameter]
-    ) -> torch.optim.Optimizer:
-        config = {k: v for k, v in optimizer_config.items() if k != "name"}
-        if optimizer_config["name"].lower() == "sgd":
-            return torch.optim.SGD(parameters, **config)
-        elif optimizer_config["name"].lower() == "adam":
-            return torch.optim.Adam(parameters, **config)
-        elif optimizer_config["name"].lower() == "rmsprop":
-            return torch.optim.RMSprop(parameters, **config)
-        raise ValueError(f"Unsupported optimizer {optimizer_config['name']}")
 
     def forward(self, x: Tensor) -> Tensor:
         x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-5)
@@ -120,12 +118,16 @@ class Net(nn.Module):
         dimensions: list[int],
         optimizer_config: dict,
         threshold: float,
+        use_softmax: bool = False,
+        num_classes: int = 10,
         device: Optional[torch.device] = None,
         dtype=None,
     ):
         super().__init__()
         self.layers: list[Layer] = []
         self.device = device if device is not None else torch.device("cpu")
+        self.use_softmax = use_softmax
+        self.num_classes = num_classes
         for index in range(len(dimensions) - 1):
             self.layers.append(
                 Layer(
@@ -138,30 +140,53 @@ class Net(nn.Module):
                     dtype=dtype,
                 )
             )
+        self.linear = None
+        self.cross_entropy_loss = None
+        self.cross_entropy_optimizer = None
+        if use_softmax:
+            self.linear = torch.nn.Linear(sum(dimensions[1:]), self.num_classes)
+            self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+            self.cross_entropy_optimizer = get_optimizer(optimizer_config, self.linear.parameters())
 
-    def train_step(self, x_positive: Tensor, x_negative: Tensor) -> float:
+    def train_step(self, x_positive: Tensor, x_negative: Tensor, y_positive: Optional[Tensor] = None) -> float:
         hidden_positive, hidden_negative = torch.flatten(x_positive.to(self.device), 1), torch.flatten(
             x_negative.to(self.device), 1
         )
         losses: list[float] = []
+        hidden_states = []
         for index, layer in enumerate(self.layers):
             hidden_positive, hidden_negative, loss = layer.train_step(hidden_positive, hidden_negative)
+            if index > 0 and self.use_softmax:
+                hidden_states.append(hidden_positive)
             losses.append(loss.item())
+        if self.use_softmax:
+            assert isinstance(self.linear, torch.nn.Linear)
+            assert isinstance(self.cross_entropy_loss, torch.nn.CrossEntropyLoss)
+            assert isinstance(self.cross_entropy_optimizer, torch.optim.Optimizer)
+            x = self.linear(torch.cat(hidden_states, 1))
+            x = torch.softmax(x, 10)
+            loss = self.cross_entropy_loss(x, y_positive)
+            self.cross_entropy_optimizer.zero_grad()
+            loss.backward()
+            self.cross_entropy_optimizer.step()
 
         return sum(losses) / len(losses)
 
     def predict(self, x: Tensor) -> Tensor:
-        goodness_per_label: list[Tensor] = []
-        for label in range(10):
-            h = torch.flatten(overlay_label(x, [label] * int(x.shape[0])), 1)
-            goodness: list[Tensor] = []
-            for index, layer in enumerate(self.layers):
-                h = layer(h.to(self.device))
-                if index > 0:  # use all but the first hidden layer as in the paper
-                    goodness.append(h.pow(2).mean(1))
-            goodness_per_label.append(Tensor(sum(goodness)).unsqueeze(1))
-        goodness_per_label_t: Tensor = torch.cat(goodness_per_label, 1)
-        return goodness_per_label_t.argmax(1)
+        if self.use_softmax:
+            raise NotImplementedError()
+        else:
+            goodness_per_label: list[Tensor] = []
+            for label in range(10):
+                h = torch.flatten(overlay_label(x, [label] * int(x.shape[0])), 1)
+                goodness: list[Tensor] = []
+                for index, layer in enumerate(self.layers):
+                    h = layer(h.to(self.device))
+                    if index > 0:  # use all but the first hidden layer as in the paper
+                        goodness.append(h.pow(2).mean(1))
+                goodness_per_label.append(Tensor(sum(goodness)).unsqueeze(1))
+            goodness_per_label_t: Tensor = torch.cat(goodness_per_label, 1)
+            return torch.softmax(goodness_per_label_t.detach(), dim=1)
 
 
 def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
@@ -175,6 +200,8 @@ def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
 
 class TrainingMode(Enum):
     RANDOM_SUPERVISED = 1
+    HARD_SUPERVISED = 2
+    SELF_SUPERVISED = 3
 
 
 def create_training_data(x: Tensor, y: Tensor, mode: TrainingMode) -> Tuple[Tensor, Tensor]:
@@ -183,13 +210,31 @@ def create_training_data(x: Tensor, y: Tensor, mode: TrainingMode) -> Tuple[Tens
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
         assert not torch.any(y == y_negative)
         x_negative = overlay_label(x, list(y_negative))
+    else:
+        raise NotImplementedError()
 
     return x_positive, x_negative
 
 
-if __name__ == "__main__":
-    train_loader, test_loader = MNIST_loaders(1_000, 10_000)
+def create_masks(size: Tuple[int, int, int], num_blurrs: int):
+    mask = torch.rand(size).unsqueeze(1)
+    filter_weight = (
+        Tensor([[0.0, 1.0 / 6.0, 0.0], [1.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0], [0.0, 1.0 / 6.0, 0.0]])
+        .unsqueeze(0)
+        .unsqueeze(0)
+    )
+    for _ in range(num_blurrs):
+        mask = torch.conv2d(mask, filter_weight, bias=None, stride=1, padding="same", dilation=1, groups=1)
+
+    mask = mask.squeeze(1)
+
+    return mask >= 0.5
+
+
+def supervised() -> None:
+    train_loader, test_loader = MNIST_loaders(512, 10_000)
     device: torch.device = torch.device("mps")
+    training_mode = TrainingMode.RANDOM_SUPERVISED
     print(f"Device: {device}")
     optmizer_config = {
         "name": "Adam",
@@ -201,7 +246,7 @@ if __name__ == "__main__":
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y, TrainingMode.RANDOM_SUPERVISED)
+            x_positive, x_negative = create_training_data(x, y, training_mode)
             total_loss += net.train_step(x_positive, x_negative)
             num_steps += 1
         print(total_loss / num_steps)
@@ -211,8 +256,44 @@ if __name__ == "__main__":
             y_prediction_l: list[Tensor] = []
             for x, y in test_loader:
                 y_true_l.append(y)
-                y_prediction_l.append(net.predict(x).cpu())
+                y_prediction_l.append(net.predict(x).argmax(1).cpu())
             y_true: Tensor = torch.cat(y_true_l)
             y_prediction: Tensor = torch.cat(y_prediction_l)
             print(f"Accuracy: {100. * (torch.sum(torch.eq(y_true, y_prediction)) / y_true.shape[0]).item():.2f}%")
             print()
+
+
+def unsupervised() -> None:
+    train_loader, test_loader = MNIST_loaders(1_000, 10_000)
+    device: torch.device = torch.device("mps")
+    training_mode = TrainingMode.RANDOM_SUPERVISED
+    print(f"Device: {device}")
+    optmizer_config = {
+        "name": "Adam",
+        "lr": 0.03,
+    }
+    net = Net([28 * 28, 2000, 2000, 2000, 2000], optimizer_config=optmizer_config, threshold=2.0, device=device)
+    for epoch in range(500):
+        print(f"Epoch #{epoch+1}")
+        total_loss: float = 0.0
+        num_steps: int = 0
+        for x, y in train_loader:
+            x_positive, x_negative = create_training_data(x, y, training_mode)
+            total_loss += net.train_step(x_positive, x_negative)
+            num_steps += 1
+        print(total_loss / num_steps)
+
+        with torch.no_grad():
+            y_true_l: list[Tensor] = []
+            y_prediction_l: list[Tensor] = []
+            for x, y in test_loader:
+                y_true_l.append(y)
+                y_prediction_l.append(net.predict(x).argmax(1).cpu())
+            y_true: Tensor = torch.cat(y_true_l)
+            y_prediction: Tensor = torch.cat(y_prediction_l)
+            print(f"Accuracy: {100. * (torch.sum(torch.eq(y_true, y_prediction)) / y_true.shape[0]).item():.2f}%")
+            print()
+
+
+if __name__ == "__main__":
+    supervised()
