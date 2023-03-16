@@ -257,7 +257,7 @@ def create_masks(size: Tuple[int, int, int], num_blurrs: int):
 
 
 def supervised() -> None:
-    train_loader, test_loader = MNIST_loaders(2**10, 2**14)
+    train_loader, test_loader = MNIST_loaders(2**8, 2**14)
     device: torch.device = torch.device("mps")
     training_mode = TrainingMode.HARD_SUPERVISED
     print(f"Device: {device}")
@@ -274,7 +274,7 @@ def supervised() -> None:
         use_softmax=True,
         optimizer_config=optimizer_config,
         sm_optimizer_config=sm_optimizer_config,
-        threshold=0.0,
+        threshold=1.0,
         device=device,
     )
     for epoch in range(500):
