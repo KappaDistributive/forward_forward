@@ -144,7 +144,7 @@ class Net(nn.Module):
         self.cross_entropy_loss = None
         self.cross_entropy_optimizer = None
         if use_softmax:
-            self.linear = torch.nn.Linear(sum(dimensions[1:]), self.num_classes)
+            self.linear = torch.nn.Linear(sum(dimensions[2:]), self.num_classes, device=self.device, dtype=dtype)
             self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
             self.cross_entropy_optimizer = get_optimizer(optimizer_config, self.linear.parameters())
 
@@ -153,7 +153,7 @@ class Net(nn.Module):
             x_negative.to(self.device), 1
         )
         losses: list[float] = []
-        hidden_states = []
+        hidden_states: list[Tensor] = []
         for index, layer in enumerate(self.layers):
             hidden_positive, hidden_negative, loss = layer.train_step(hidden_positive, hidden_negative)
             if index > 0 and self.use_softmax:
@@ -163,9 +163,11 @@ class Net(nn.Module):
             assert isinstance(self.linear, torch.nn.Linear)
             assert isinstance(self.cross_entropy_loss, torch.nn.CrossEntropyLoss)
             assert isinstance(self.cross_entropy_optimizer, torch.optim.Optimizer)
+            assert isinstance(y_positive, Tensor)
             x = self.linear(torch.cat(hidden_states, 1))
-            x = torch.softmax(x, 10)
-            loss = self.cross_entropy_loss(x, y_positive)
+            x = torch.softmax(x, 1)
+            loss = self.cross_entropy_loss(x, y_positive.to(self.device))
+            losses.append(loss.item())
             self.cross_entropy_optimizer.zero_grad()
             loss.backward()
             self.cross_entropy_optimizer.step()
@@ -174,7 +176,16 @@ class Net(nn.Module):
 
     def predict(self, x: Tensor) -> Tensor:
         if self.use_softmax:
-            raise NotImplementedError()
+            x = x.clone()
+            x[:, :, 0, :10] = 0.1
+            h = torch.flatten(x, 1)
+            hidden_states: list[Tensor] = []
+            for index, layer in enumerate(self.layers):
+                h = layer(h.to(self.device))
+                if index > 0:
+                    hidden_states.append(h)
+            assert isinstance(self.linear, torch.nn.Linear)
+            return torch.softmax(self.linear(torch.cat(hidden_states, 1)), 1)
         else:
             goodness_per_label: list[Tensor] = []
             for label in range(10):
@@ -192,8 +203,9 @@ class Net(nn.Module):
 def find_hard_negative_label(images: Tensor, labels: Tensor, net: Net) -> Tensor:
     with torch.no_grad():
         predictions = net.predict(images)
-        predictions[range(images.shape[0]), labels] = 0.0
-    return predictions.argmax(1).detach()
+        predictions[range(images.shape[0]), labels] = 1e-32
+        predictions /= torch.sum(predictions, 0)
+    return torch.multinomial(predictions, 1).squeeze(1)
 
 
 def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
@@ -243,7 +255,7 @@ def create_masks(size: Tuple[int, int, int], num_blurrs: int):
 
 
 def supervised() -> None:
-    train_loader, test_loader = MNIST_loaders(512, 10_000)
+    train_loader, test_loader = MNIST_loaders(2**10, 2**14)
     device: torch.device = torch.device("mps")
     training_mode = TrainingMode.HARD_SUPERVISED
     print(f"Device: {device}")
@@ -251,14 +263,23 @@ def supervised() -> None:
         "name": "Adam",
         "lr": 0.03,
     }
-    net = Net([28 * 28, 2000, 2000, 2000, 2000], optimizer_config=optmizer_config, threshold=2.0, device=device)
+    net = Net(
+        [28 * 28, 2000, 2000, 2000, 2000],
+        use_softmax=True,
+        optimizer_config=optmizer_config,
+        threshold=0.0,
+        device=device,
+    )
     for epoch in range(500):
         print(f"Epoch #{epoch+1}")
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y, net, training_mode)
-            total_loss += net.train_step(x_positive, x_negative)
+            if epoch == 0:
+                x_positive, x_negative = create_training_data(x, y, net, TrainingMode.RANDOM_SUPERVISED)
+            else:
+                x_positive, x_negative = create_training_data(x, y, net, training_mode)
+            total_loss += net.train_step(x_positive, x_negative, y)
             num_steps += 1
         print(total_loss / num_steps)
 
