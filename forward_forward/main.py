@@ -166,7 +166,7 @@ class Net(nn.Module):
             assert isinstance(self.cross_entropy_loss, torch.nn.CrossEntropyLoss)
             assert isinstance(self.cross_entropy_optimizer, torch.optim.Optimizer)
             assert isinstance(y_positive, Tensor)
-            x = self.linear(torch.cat(hidden_states, 1).detach())
+            x = self.linear(torch.cat(hidden_states, 1))
             x = torch.softmax(x, 1)
             loss = self.cross_entropy_loss(x, y_positive.to(self.device))
             losses.append(loss.item())
