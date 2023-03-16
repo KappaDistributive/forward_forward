@@ -177,9 +177,7 @@ class Net(nn.Module):
         return sum(losses) / len(losses)
 
     @torch.no_grad()
-    def predict(self, x: Tensor, prefer_goodness: Optional[bool] = None) -> Tensor:
-        if prefer_goodness is None:
-            prefer_goodness = False
+    def predict(self, x: Tensor, prefer_goodness: bool = False) -> Tensor:
         if self.use_softmax and (not prefer_goodness):
             x = x.clone()
             x[:, :, 0, :10] = 0.1
@@ -205,9 +203,9 @@ class Net(nn.Module):
             return torch.softmax(goodness_per_label_t.detach(), dim=1)
 
 
-def find_hard_negative_label(images: Tensor, labels: Tensor, net: Net) -> Tensor:
+def find_hard_negative_label(images: Tensor, labels: Tensor, net: Net, prefer_goodness: bool = False) -> Tensor:
     with torch.no_grad():
-        predictions = net.predict(images)
+        predictions = net.predict(images, prefer_goodness=prefer_goodness)
         predictions[range(images.shape[0]), labels] = 1e-32
         predictions /= torch.sum(predictions, 0)
     return torch.multinomial(predictions, 1).squeeze(1)
@@ -218,7 +216,6 @@ def overlay_label(images: Tensor, labels: list[int]) -> Tensor:
     x = images.clone()
     x[:, :, 0, :10] = 0.0
     x[range(x.shape[0]), :, 0, labels] = 1.0
-
     return x
 
 
