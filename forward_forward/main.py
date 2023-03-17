@@ -5,7 +5,7 @@ import os
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -256,10 +256,25 @@ def create_masks(size: Tuple[int, int, int], num_blurrs: int):
     return mask >= 0.5
 
 
+def calculate_accuracy(predictor: Callable[[Tensor], Tensor], images: list[Tensor], labels: list[Tensor]) -> float:
+    assert len(images) == len(labels)
+    y_pred: list[Tensor] = []
+    for x, y in zip(images, labels):
+        y_pred.append(predictor(x))
+    y_true = torch.cat(labels).cpu()
+    return torch.sum(torch.eq(y_true, torch.cat(y_pred))).item() / y_true.shape[0]
+
+
 def supervised() -> None:
     train_loader, test_loader = MNIST_loaders(2**8, 2**14)
     device: torch.device = torch.device("mps")
     training_mode = TrainingMode.HARD_SUPERVISED
+    xs_test: list[Tensor] = []
+    ys_test: list[Tensor] = []
+    for x, y in test_loader:
+        xs_test.append(x)
+        ys_test.append(y)
+
     print(f"Device: {device}")
     optimizer_config = {
         "name": "Adam",
@@ -288,25 +303,13 @@ def supervised() -> None:
         print(total_loss / num_steps)
 
         with torch.no_grad():
-            y_true_l: list[Tensor] = []
-            y_prediction_l: list[Tensor] = []
-            for x, y in test_loader:
-                y_true_l.append(y)
-                y_prediction_l.append(net.predict(x).argmax(1).cpu())
-            y_true: Tensor = torch.cat(y_true_l)
-            y_prediction: Tensor = torch.cat(y_prediction_l)
-            print(f"Accuracy: {100. * (torch.sum(torch.eq(y_true, y_prediction)) / y_true.shape[0]).item():.2f}%")
+            accuracy: float = 100.0 * calculate_accuracy(lambda x: net.predict(x).argmax(1).cpu(), xs_test, ys_test)
+            print(f"Accuracy: {accuracy:.2f}%")
             if net.use_softmax:
-                y_true_l_sm: list[Tensor] = []
-                y_prediction_l_sm: list[Tensor] = []
-                for x, y in test_loader:
-                    y_true_l_sm.append(y)
-                    y_prediction_l_sm.append(net.predict(x, prefer_goodness=True).argmax(1).cpu())
-                y_true_sm: Tensor = torch.cat(y_true_l_sm)
-                y_prediction_sm: Tensor = torch.cat(y_prediction_l_sm)
-                print(
-                    f"Accuracy (goodness): {100. * (torch.sum(torch.eq(y_true_sm, y_prediction_sm)) / y_true_sm.shape[0]).item():.2f}%"
+                accuracy = 100.0 * calculate_accuracy(
+                    lambda x: net.predict(x, prefer_goodness=True).argmax(1).cpu(), xs_test, ys_test
                 )
+                print(f"Accuracy (goodness): {accuracy:.2f}%")
             print()
 
 
