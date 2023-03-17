@@ -260,7 +260,7 @@ def calculate_accuracy(predictor: Callable[[Tensor], Tensor], images: list[Tenso
     assert len(images) == len(labels)
     y_pred: list[Tensor] = []
     for x, y in zip(images, labels):
-        y_pred.append(predictor(x))
+        y_pred.append(predictor(x).argmax(1))
     y_true = torch.cat(labels).cpu()
     return torch.sum(torch.eq(y_true, torch.cat(y_pred))).item() / y_true.shape[0]
 
@@ -303,11 +303,11 @@ def supervised() -> None:
         print(total_loss / num_steps)
 
         with torch.no_grad():
-            accuracy: float = 100.0 * calculate_accuracy(lambda x: net.predict(x).argmax(1).cpu(), xs_test, ys_test)
+            accuracy: float = 100.0 * calculate_accuracy(lambda x: net.predict(x).cpu(), xs_test, ys_test)
             print(f"Accuracy: {accuracy:.2f}%")
             if net.use_softmax:
                 accuracy = 100.0 * calculate_accuracy(
-                    lambda x: net.predict(x, prefer_goodness=True).argmax(1).cpu(), xs_test, ys_test
+                    lambda x: net.predict(x, prefer_goodness=True).cpu(), xs_test, ys_test
                 )
                 print(f"Accuracy (goodness): {accuracy:.2f}%")
             print()
