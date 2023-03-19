@@ -7,6 +7,7 @@ import sys
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, Iterator, Optional, Tuple
 
 import torch
@@ -282,7 +283,9 @@ def calculate_accuracy(predictor: Callable[[Tensor], Tensor], images: list[Tenso
 def run() -> None:
     train_loader, test_loader = MNIST_loaders(2**8, 2**14)
     device: torch.device = torch.device("mps")
+    print(f"Device: {device}")
     training_mode = TrainingMode.SELF_SUPERVISED
+    print(f"Training Mode: {training_mode}")
     keep_image: bool = False
     if training_mode.SELF_SUPERVISED:
         keep_image = True
@@ -300,7 +303,6 @@ def run() -> None:
             for index in range(x.shape[0]):
                 train_dict[int(y[index])].append(x[index])
 
-    print(f"Device: {device}")
     optimizer_config = {
         "name": "Adam",
         "lr": 0.03,
@@ -310,33 +312,44 @@ def run() -> None:
         "lr": 0.001,
     }
     net = Net(
-        [28 * 28, 2000, 2000, 2000, 2000],
+        [28 * 28, 2000, 2000, 2000],
         use_softmax=True,
         optimizer_config=optimizer_config,
         sm_optimizer_config=sm_optimizer_config,
         threshold=1.0,
         device=device,
     )
-    for epoch in range(500):
+    for epoch in range(500):  # training loop
+        timer: float = perf_counter()
+        num_images: int = 0
         print(f"Epoch #{epoch+1}")
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
+            num_images += int(x.shape[0])
             x_positive, x_negative = create_training_data(x, y, net, train_dict, training_mode)
             total_loss += net.train_step(x_positive, x_negative, y)
             num_steps += 1
         print(total_loss / num_steps)
+        print(f"Training: {num_images / (perf_counter() - timer):_.0f} images/second")
 
         with torch.no_grad():
+            timer = perf_counter()
             accuracy: float = 100.0 * calculate_accuracy(
                 lambda x: net.predict(x, keep_image=keep_image).cpu(), xs_test, ys_test
             )
             print(f"Accuracy: {accuracy:.2f}%")
+
+            num_images = sum(x.shape[0] for x in xs_test)
+            print(f"Evaluation: {num_images / (perf_counter() - timer):_.0f} images/second")
             if not training_mode.SELF_SUPERVISED and net.use_softmax:
+                timer = perf_counter()
                 accuracy = 100.0 * calculate_accuracy(
                     lambda x: net.predict(x, prefer_goodness=True, keep_image=keep_image).cpu(), xs_test, ys_test
                 )
-                print(f"Accuracy (goodness): {accuracy:.2f}%")
+                print(f"Accuracy (goodness): {accuracy:_.0f}%")
+                num_images = sum(x.shape[0] for x in xs_test)
+                print(f"Evaluation (goodness): {num_images / (perf_counter() - timer):.2f} images/second")
             print()
 
 
