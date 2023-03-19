@@ -2,7 +2,9 @@
 [The Forward-Forward Algorithm: Some Preliminary Investigations](https://arxiv.org/abs/2212.13345)
 """
 import os
+import random
 import sys
+from collections import defaultdict
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Tuple
@@ -177,10 +179,11 @@ class Net(nn.Module):
         return sum(losses) / len(losses)
 
     @torch.no_grad()
-    def predict(self, x: Tensor, prefer_goodness: bool = False) -> Tensor:
+    def predict(self, x: Tensor, prefer_goodness: bool = False, keep_image: bool = False) -> Tensor:
         if self.use_softmax and (not prefer_goodness):
             x = x.clone()
-            x[:, :, 0, :10] = 0.1
+            if not keep_image:
+                x[:, :, 0, :10] = 0.1
             h = torch.flatten(x, 1)
             hidden_states: list[Tensor] = []
             for index, layer in enumerate(self.layers):
@@ -225,7 +228,9 @@ class TrainingMode(Enum):
     SELF_SUPERVISED = 3
 
 
-def create_training_data(x: Tensor, y: Tensor, net: Net, mode: TrainingMode) -> Tuple[Tensor, Tensor]:
+def create_training_data(
+    x: Tensor, y: Tensor, net: Net, data_dict: dict[int, list[Tensor]], mode: TrainingMode
+) -> Tuple[Tensor, Tensor]:
     if mode == TrainingMode.RANDOM_SUPERVISED:
         x_positive = overlay_label(x, list(y))
         y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
@@ -235,6 +240,15 @@ def create_training_data(x: Tensor, y: Tensor, net: Net, mode: TrainingMode) -> 
         x_positive = overlay_label(x, list(y))
         y_negative = find_hard_negative_label(x, y, net)
         x_negative = overlay_label(x, list(y_negative))
+    elif mode == TrainingMode.SELF_SUPERVISED:
+        x_positive = x.clone()
+        y_negative = torch.remainder(y + torch.randint(1, 10, y.shape), 10)
+        x_negative_temp: list[Tensor] = []
+        for index in range(x.shape[0]):
+            x_negative_temp.append(random.choice(data_dict[int(y_negative[index])]))
+        mask = create_masks((x.shape[0], x.shape[2], x.shape[3]), 15)
+        x_negative = torch.cat(x_negative_temp).unsqueeze(1)
+        x_negative = mask * x_positive + (~mask * x_negative)
     else:
         raise NotImplementedError()
 
@@ -251,7 +265,7 @@ def create_masks(size: Tuple[int, int, int], num_blurrs: int):
     for _ in range(num_blurrs):
         mask = torch.conv2d(mask, filter_weight, bias=None, stride=1, padding="same", dilation=1, groups=1)
 
-    mask = mask.squeeze(1)
+    # mask = mask.squeeze(1)
 
     return mask >= 0.5
 
@@ -265,15 +279,26 @@ def calculate_accuracy(predictor: Callable[[Tensor], Tensor], images: list[Tenso
     return torch.sum(torch.eq(y_true, torch.cat(y_pred))).item() / y_true.shape[0]
 
 
-def supervised() -> None:
+def run() -> None:
     train_loader, test_loader = MNIST_loaders(2**8, 2**14)
     device: torch.device = torch.device("mps")
-    training_mode = TrainingMode.HARD_SUPERVISED
+    training_mode = TrainingMode.SELF_SUPERVISED
+    keep_image: bool = False
+    if training_mode.SELF_SUPERVISED:
+        keep_image = True
     xs_test: list[Tensor] = []
     ys_test: list[Tensor] = []
-    for x, y in test_loader:
-        xs_test.append(x)
-        ys_test.append(y)
+    if TrainingMode.HARD_SUPERVISED:
+        for x, y in test_loader:
+            xs_test.append(x)
+            ys_test.append(y)
+
+    train_dict: defaultdict[int, list[Tensor]] = defaultdict(list)
+    if TrainingMode.SELF_SUPERVISED:
+        for x, y in train_loader:
+            assert x.shape[0] == y.shape[0]
+            for index in range(x.shape[0]):
+                train_dict[int(y[index])].append(x[index])
 
     print(f"Device: {device}")
     optimizer_config = {
@@ -297,21 +322,23 @@ def supervised() -> None:
         total_loss: float = 0.0
         num_steps: int = 0
         for x, y in train_loader:
-            x_positive, x_negative = create_training_data(x, y, net, training_mode)
+            x_positive, x_negative = create_training_data(x, y, net, train_dict, training_mode)
             total_loss += net.train_step(x_positive, x_negative, y)
             num_steps += 1
         print(total_loss / num_steps)
 
         with torch.no_grad():
-            accuracy: float = 100.0 * calculate_accuracy(lambda x: net.predict(x).cpu(), xs_test, ys_test)
+            accuracy: float = 100.0 * calculate_accuracy(
+                lambda x: net.predict(x, keep_image=keep_image).cpu(), xs_test, ys_test
+            )
             print(f"Accuracy: {accuracy:.2f}%")
-            if net.use_softmax:
+            if not training_mode.SELF_SUPERVISED and net.use_softmax:
                 accuracy = 100.0 * calculate_accuracy(
-                    lambda x: net.predict(x, prefer_goodness=True).cpu(), xs_test, ys_test
+                    lambda x: net.predict(x, prefer_goodness=True, keep_image=keep_image).cpu(), xs_test, ys_test
                 )
                 print(f"Accuracy (goodness): {accuracy:.2f}%")
             print()
 
 
 if __name__ == "__main__":
-    supervised()
+    run()
