@@ -93,7 +93,7 @@ class Layer(nn.Linear):
         self.threshold = threshold
 
     def forward(self, x: Tensor) -> Tensor:
-        x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-5)
+        x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-4)
         return self.activation(torch.mm(x_direction, self.weight.T) + self.bias.unsqueeze(0))
 
     def train_step(self, x_positive: Tensor, x_negative: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
@@ -105,7 +105,7 @@ class Layer(nn.Linear):
 
         # [Logistic Margin Loss](http://juliaml.github.io/LossFunctions.jl/stable/losses/margin/#LogitMarginLoss-1)
         loss = torch.log(
-            1 + torch.exp(-torch.cat([goodness_positive - self.threshold, -goodness_negative + self.threshold]))
+            1 + torch.exp(torch.cat([-goodness_positive + self.threshold, goodness_negative - self.threshold], 0))
         ).mean()
 
         self.optimizer.zero_grad()
@@ -281,23 +281,24 @@ def calculate_accuracy(predictor: Callable[[Tensor], Tensor], images: list[Tenso
 
 
 def run() -> None:
-    train_loader, test_loader = MNIST_loaders(2**8, 2**14)
+    train_loader, test_loader = MNIST_loaders(2**10, 2**14)
     device: torch.device = torch.device("mps")
     print(f"Device: {device}")
-    training_mode = TrainingMode.SELF_SUPERVISED
+    training_mode = TrainingMode.HARD_SUPERVISED
     print(f"Training Mode: {training_mode}")
     keep_image: bool = False
-    if training_mode.SELF_SUPERVISED:
+    if training_mode == TrainingMode.SELF_SUPERVISED:
         keep_image = True
+
     xs_test: list[Tensor] = []
     ys_test: list[Tensor] = []
-    if TrainingMode.HARD_SUPERVISED:
+    if training_mode in (TrainingMode.RANDOM_SUPERVISED, TrainingMode.HARD_SUPERVISED):
         for x, y in test_loader:
             xs_test.append(x)
             ys_test.append(y)
 
     train_dict: defaultdict[int, list[Tensor]] = defaultdict(list)
-    if TrainingMode.SELF_SUPERVISED:
+    if training_mode == TrainingMode.SELF_SUPERVISED:
         for x, y in train_loader:
             assert x.shape[0] == y.shape[0]
             for index in range(x.shape[0]):
@@ -316,7 +317,7 @@ def run() -> None:
         use_softmax=True,
         optimizer_config=optimizer_config,
         sm_optimizer_config=sm_optimizer_config,
-        threshold=1.0,
+        threshold=0.0,
         device=device,
     )
     for epoch in range(500):  # training loop
@@ -330,7 +331,7 @@ def run() -> None:
             x_positive, x_negative = create_training_data(x, y, net, train_dict, training_mode)
             total_loss += net.train_step(x_positive, x_negative, y)
             num_steps += 1
-        print(total_loss / num_steps)
+        print(f"Loss: {total_loss / num_steps:.8f}")
         print(f"Training: {num_images / (perf_counter() - timer):_.0f} images/second")
 
         with torch.no_grad():
@@ -342,14 +343,22 @@ def run() -> None:
 
             num_images = sum(x.shape[0] for x in xs_test)
             print(f"Evaluation: {num_images / (perf_counter() - timer):_.0f} images/second")
-            if not training_mode.SELF_SUPERVISED and net.use_softmax:
+
+            if (not training_mode == TrainingMode.SELF_SUPERVISED) and net.use_softmax:
                 timer = perf_counter()
                 accuracy = 100.0 * calculate_accuracy(
                     lambda x: net.predict(x, prefer_goodness=True, keep_image=keep_image).cpu(), xs_test, ys_test
                 )
-                print(f"Accuracy (goodness): {accuracy:_.0f}%")
+                print(f"Accuracy (goodness): {accuracy:.2f}%")
                 num_images = sum(x.shape[0] for x in xs_test)
-                print(f"Evaluation (goodness): {num_images / (perf_counter() - timer):.2f} images/second")
+                print(f"Evaluation (goodness): {num_images / (perf_counter() - timer):_.0f} images/second")
+
+            print("\nLayer Norms:")
+            for layer_index, layer in enumerate(net.layers):
+                print(f"{layer_index}: {layer.weight.norm().item():.2f}\t{layer.bias.norm().item():.2f}")
+            if net.use_softmax:
+                assert isinstance(net.linear, torch.nn.Linear)
+                print(f"linear: {net.linear.weight.norm().item():.2f}\t{net.linear.bias.norm().item():.2f}")
             print()
 
 
